@@ -12,25 +12,14 @@ from ics2000.Core import Hub
 from ics2000.Devices import Device, Dimmer
 from enum import Enum
 
-# Import the device class from the component that you want to support
 import homeassistant.helpers.config_validation as cv
 from homeassistant.components.light import ATTR_BRIGHTNESS, PLATFORM_SCHEMA, LightEntity, ColorMode
-from homeassistant.const import CONF_PASSWORD, CONF_MAC, CONF_EMAIL,CONF_IP_ADDRESS
+from homeassistant.const import CONF_PASSWORD, CONF_MAC, CONF_EMAIL, CONF_IP_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def repeat(tries: int, sleep: int, callable_function, **kwargs):
-    _LOGGER.info(f'Function repeat called in thread {threading.current_thread().name}')
-    qualname = getattr(callable_function, '__qualname__')
-    for i in range(0, tries):
-        _LOGGER.info(f'Try {i + 1} of {tries} on {qualname}')
-        callable_function(**kwargs)
-        time.sleep(sleep if i != tries - 1 else 0)
-
 
 # Validation of the user's configuration
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -43,64 +32,19 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional('aes'): cv.matches_regex(r'[a-zA-Z0-9]{32}')
 })
 
-
-def setup_platform(
-        hass: HomeAssistant,
-        config: ConfigType,
-        add_entities: AddEntitiesCallback,
-        discovery_info: DiscoveryInfoType | None = None
-) -> None:
-    """Set up the ICS2000 Light platform."""
-    # Assign configuration variables.
-    # The configuration check takes care they are present.
-    # Setup connection with devices/cloud
-    hub = Hub(
-        config[CONF_MAC],
-        config[CONF_EMAIL],
-        config[CONF_PASSWORD]
-    )
-
-    # Verify that passed in configuration works
-    if not hub.connected:
-        _LOGGER.error("Could not connect to ICS2000 hub")
-        return
-
-    # Add devices
-    add_entities(KlikAanKlikUitDevice(
-        device=device,
-        tries=int(config.get('tries', 1)),
-        sleep=int(config.get('sleep', 3))
-    ) for device in hub.devices)
-
+def repeat(tries: int, sleep: int, callable_function, **kwargs):
+    """Function to retry an action with a delay"""
+    _LOGGER.info(f'Function repeat called in thread {threading.current_thread().name}')
+    qualname = getattr(callable_function, '__qualname__')
+    for i in range(tries):
+        _LOGGER.info(f'Try {i + 1} of {tries} on {qualname}')
+        callable_function(**kwargs)
+        time.sleep(sleep if i != tries - 1 else 0)
 
 class KlikAanKlikUitAction(Enum):
     TURN_ON = 'on'
     TURN_OFF = 'off'
     DIM = 'dim'
-
-
-class KlikAanKlikUitThread(threading.Thread):
-
-    def __init__(self, action: KlikAanKlikUitAction, device_id, target, kwargs):
-        super().__init__(
-            # Thread name may be 15 characters max
-            name=f'kaku{action.value}{device_id}',
-            target=target,
-            kwargs=kwargs
-        )
-
-    @staticmethod
-    def has_running_threads(device_id) -> bool:
-        running_threads = [thread.name for thread in threading.enumerate() if thread.name in [
-            f'kaku{KlikAanKlikUitAction.TURN_ON.value}{device_id}',
-            f'kaku{KlikAanKlikUitAction.DIM.value}{device_id}',
-            f'kaku{KlikAanKlikUitAction.TURN_OFF.value}{device_id}'
-        ]]
-        if running_threads:
-            _LOGGER.info(f'Running KlikAanKlikUit threads: {",".join(running_threads)}')
-            return True
-        return False
-
 
 class KlikAanKlikUitDevice(LightEntity):
     """Representation of a KlikAanKlikUit device"""
@@ -114,7 +58,7 @@ class KlikAanKlikUitDevice(LightEntity):
         self._hub = device.hub
         self._state = None
         self._brightness = None
-        if Dimmer == type(device):
+        if isinstance(device, Dimmer):
             _LOGGER.info(f'Adding dimmer with name {device.name}')
             self._attr_color_mode = ColorMode.BRIGHTNESS
             self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
@@ -130,11 +74,7 @@ class KlikAanKlikUitDevice(LightEntity):
 
     @property
     def brightness(self):
-        """Return the brightness of the light.
-
-        This method is optional. Removing it indicates to Home Assistant
-        that brightness is not supported for this light.
-        """
+        """Return the brightness of the light."""
         return self._brightness
 
     @property
@@ -143,56 +83,30 @@ class KlikAanKlikUitDevice(LightEntity):
         return self._state
 
     def turn_on(self, **kwargs: Any) -> None:
+        """Turn the light on with a possible brightness adjustment."""
         _LOGGER.info(f'Function turn_on called in thread {threading.current_thread().name}')
-        if KlikAanKlikUitThread.has_running_threads(self._id):
-            return
 
-        self._brightness = kwargs.get(ATTR_BRIGHTNESS, 255)
+        # Ensure we are not firing actions too fast
         if self.is_on is None or not self.is_on:
-            KlikAanKlikUitThread(
-                action=KlikAanKlikUitAction.TURN_ON,
-                device_id=self._id,
-                target=repeat,
-                kwargs={
-                    'tries': self.tries,
-                    'sleep': self.sleep,
-                    'callable_function': self._hub.turn_on,
-                    'entity': self._id
-                }
-            ).start()
-        else:
-            # KlikAanKlikUit brightness goes from 1 to 15 so divide by 17
-            KlikAanKlikUitThread(
-                action=KlikAanKlikUitAction.DIM,
-                device_id=self._id,
-                target=repeat,
-                kwargs={
-                    'tries': self.tries,
-                    'sleep': self.sleep,
-                    'callable_function': self._hub.dim,
-                    'entity': self._id,
-                    'level': math.ceil(self.brightness / 17)
-                }
-            ).start()
-        self._state = True
+            self._brightness = kwargs.get(ATTR_BRIGHTNESS, 255)
+            self._state = True  # Update state to ON
+            # Perform the actions sequentially with a 0.5 second gap
+            self._hub.turn_on(self._id)  # Turn on the device
+            
+            if self._brightness < 255:  # If not full brightness, adjust
+                level = math.ceil(self._brightness / 17)  # Scale brightness to the device's expected range
+                self._hub.dim(self._id, level)  # Dim the device to the appropriate level
+                
 
     def turn_off(self, **kwargs: Any) -> None:
+        """Turn the light off."""
         _LOGGER.info(f'Function turn_off called in thread {threading.current_thread().name}')
-        if KlikAanKlikUitThread.has_running_threads(self._id):
-            return
 
-        KlikAanKlikUitThread(
-            action=KlikAanKlikUitAction.TURN_OFF,
-            device_id=self._id,
-            target=repeat,
-            kwargs={
-                'tries': self.tries,
-                'sleep': self.sleep,
-                'callable_function': self._hub.turn_off,
-                'entity': self._id
-            }
-        ).start()
-        self._state = False
+        # Ensure we are not firing actions too fast
+        self._state = False  # Update state to OFF
+        self._hub.turn_off(self._id)  # Turn off the device
+        
 
     def update(self) -> None:
+        """Update the state of the device."""
         pass
