@@ -12,14 +12,25 @@ from ics2000.Core import Hub
 from ics2000.Devices import Device, Dimmer
 from enum import Enum
 
+# Import the device class from the component that you want to support
 import homeassistant.helpers.config_validation as cv
 from homeassistant.components.light import ATTR_BRIGHTNESS, PLATFORM_SCHEMA, LightEntity, ColorMode
-from homeassistant.const import CONF_PASSWORD, CONF_MAC, CONF_EMAIL, CONF_IP_ADDRESS
+from homeassistant.const import CONF_PASSWORD, CONF_MAC, CONF_EMAIL,CONF_IP_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def repeat(tries: int, sleep: int, callable_function, **kwargs):
+    _LOGGER.info(f'Function repeat called in thread {threading.current_thread().name}')
+    qualname = getattr(callable_function, '__qualname__')
+    for i in range(0, tries):
+        _LOGGER.info(f'Try {i + 1} of {tries} on {qualname}')
+        callable_function(**kwargs)
+        time.sleep(sleep if i != tries - 1 else 0)
+
 
 # Validation of the user's configuration
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -32,14 +43,35 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional('aes'): cv.matches_regex(r'[a-zA-Z0-9]{32}')
 })
 
-def repeat(tries: int, sleep: int, callable_function, **kwargs):
-    """Function to retry an action with a delay"""
-    _LOGGER.info(f'Function repeat called in thread {threading.current_thread().name}')
-    qualname = getattr(callable_function, '__qualname__')
-    for i in range(tries):
-        _LOGGER.info(f'Try {i + 1} of {tries} on {qualname}')
-        callable_function(**kwargs)
-        time.sleep(sleep if i != tries - 1 else 0)
+
+def setup_platform(
+        hass: HomeAssistant,
+        config: ConfigType,
+        add_entities: AddEntitiesCallback,
+        discovery_info: DiscoveryInfoType | None = None
+) -> None:
+    """Set up the ICS2000 Light platform."""
+    # Assign configuration variables.
+    # The configuration check takes care they are present.
+    # Setup connection with devices/cloud
+    hub = Hub(
+        config[CONF_MAC],
+        config[CONF_EMAIL],
+        config[CONF_PASSWORD]
+    )
+
+    # Verify that passed in configuration works
+    if not hub.connected:
+        _LOGGER.error("Could not connect to ICS2000 hub")
+        return
+
+    # Add devices
+    add_entities(KlikAanKlikUitDevice(
+        device=device,
+        tries=int(config.get('tries', 1)),
+        sleep=int(config.get('sleep', 3))
+    ) for device in hub.devices)
+
 
 class KlikAanKlikUitAction(Enum):
     TURN_ON = 'on'
@@ -58,7 +90,7 @@ class KlikAanKlikUitDevice(LightEntity):
         self._hub = device.hub
         self._state = None
         self._brightness = None
-        if isinstance(device, Dimmer):
+        if Dimmer == type(device):
             _LOGGER.info(f'Adding dimmer with name {device.name}')
             self._attr_color_mode = ColorMode.BRIGHTNESS
             self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
@@ -74,7 +106,11 @@ class KlikAanKlikUitDevice(LightEntity):
 
     @property
     def brightness(self):
-        """Return the brightness of the light."""
+        """Return the brightness of the light.
+
+        This method is optional. Removing it indicates to Home Assistant
+        that brightness is not supported for this light.
+        """
         return self._brightness
 
     @property
