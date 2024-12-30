@@ -1,7 +1,7 @@
 # Due to the older Home Assistant version, some other dependencies have
 # also been pinned to older versions
 git+https://github.com/martijnlucas/ics2000-python@master#egg=ics2000
-homeassistant==2024.6.4
-voluptuous==0.13.1
+homeassistant==2024.12.5
+voluptuous==0.15.2
 pip==24.3.1
 flake8
