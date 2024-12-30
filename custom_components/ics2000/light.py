@@ -78,6 +78,30 @@ class KlikAanKlikUitAction(Enum):
     TURN_OFF = 'off'
     DIM = 'dim'
 
+
+class KlikAanKlikUitThread(threading.Thread):
+
+    def __init__(self, action: KlikAanKlikUitAction, device_id, target, kwargs):
+        super().__init__(
+            # Thread name may be 15 characters max
+            name=f'kaku{action.value}{device_id}',
+            target=target,
+            kwargs=kwargs
+        )
+
+    @staticmethod
+    def has_running_threads(device_id) -> bool:
+        running_threads = [thread.name for thread in threading.enumerate() if thread.name in [
+            f'kaku{KlikAanKlikUitAction.TURN_ON.value}{device_id}',
+            f'kaku{KlikAanKlikUitAction.DIM.value}{device_id}',
+            f'kaku{KlikAanKlikUitAction.TURN_OFF.value}{device_id}'
+        ]]
+        if running_threads:
+            _LOGGER.info(f'Running KlikAanKlikUit threads: {",".join(running_threads)}')
+            return True
+        return False
+
+
 class KlikAanKlikUitDevice(LightEntity):
     """Representation of a KlikAanKlikUit device"""
 
@@ -119,30 +143,56 @@ class KlikAanKlikUitDevice(LightEntity):
         return self._state
 
     def turn_on(self, **kwargs: Any) -> None:
-        """Turn the light on with a possible brightness adjustment."""
         _LOGGER.info(f'Function turn_on called in thread {threading.current_thread().name}')
+        if KlikAanKlikUitThread.has_running_threads(self._id):
+            return
 
-        # Ensure we are not firing actions too fast
+        self._brightness = kwargs.get(ATTR_BRIGHTNESS, 255)
         if self.is_on is None or not self.is_on:
-            self._brightness = kwargs.get(ATTR_BRIGHTNESS, 255)
-            self._state = True  # Update state to ON
-            # Perform the actions sequentially with a 0.5 second gap
-            self._hub.turn_on(self._id)  # Turn on the device
-            
-            if self._brightness < 255:  # If not full brightness, adjust
-                level = math.ceil(self._brightness / 17)  # Scale brightness to the device's expected range
-                self._hub.dim(self._id, level)  # Dim the device to the appropriate level
-                
+            KlikAanKlikUitThread(
+                action=KlikAanKlikUitAction.TURN_ON,
+                device_id=self._id,
+                target=repeat,
+                kwargs={
+                    'tries': self.tries,
+                    'sleep': self.sleep,
+                    'callable_function': self._hub.turn_on,
+                    'entity': self._id
+                }
+            ).start()
+        else:
+            # KlikAanKlikUit brightness goes from 1 to 15 so divide by 17
+            KlikAanKlikUitThread(
+                action=KlikAanKlikUitAction.DIM,
+                device_id=self._id,
+                target=repeat,
+                kwargs={
+                    'tries': self.tries,
+                    'sleep': self.sleep,
+                    'callable_function': self._hub.dim,
+                    'entity': self._id,
+                    'level': math.ceil(self.brightness / 17)
+                }
+            ).start()
+        self._state = True
 
     def turn_off(self, **kwargs: Any) -> None:
-        """Turn the light off."""
         _LOGGER.info(f'Function turn_off called in thread {threading.current_thread().name}')
+        if KlikAanKlikUitThread.has_running_threads(self._id):
+            return
 
-        # Ensure we are not firing actions too fast
-        self._state = False  # Update state to OFF
-        self._hub.turn_off(self._id)  # Turn off the device
-        
+        KlikAanKlikUitThread(
+            action=KlikAanKlikUitAction.TURN_OFF,
+            device_id=self._id,
+            target=repeat,
+            kwargs={
+                'tries': self.tries,
+                'sleep': self.sleep,
+                'callable_function': self._hub.turn_off,
+                'entity': self._id
+            }
+        ).start()
+        self._state = False
 
     def update(self) -> None:
-        """Update the state of the device."""
         pass
