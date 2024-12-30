@@ -1,6 +1,8 @@
 """Platform for light integration."""
 from __future__ import annotations
 
+import queue
+import time
 import math
 import logging
 import time
@@ -80,26 +82,42 @@ class KlikAanKlikUitAction(Enum):
 
 
 class KlikAanKlikUitThread(threading.Thread):
+    def __init__(self):
+        super().__init__(name="KlikAanKlikUitWorker")
+        self.task_queue = queue.Queue()
+        self.stop_event = threading.Event()
+    
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                # Wait for a task with a timeout
+                task = self.task_queue.get(timeout=1)
+                self.process_task(task)
+                self.task_queue.task_done()
+            except queue.Empty:
+                # No task to process, loop continues
+                continue
+    
+    def process_task(self, task):
+        device_id = task.get("device_id")
+        action = task.get("action")
+        params = task.get("params", {})
+        print(f"Processing action '{action}' for device '{device_id}' with params: {params}")
+        # Simulate action processing
+        time.sleep(0.5)  # Simulate some delay
 
-    def __init__(self, action: KlikAanKlikUitAction, device_id, target, kwargs):
-        super().__init__(
-            # Thread name may be 15 characters max
-            name=f'kaku{action.value}{device_id}',
-            target=target,
-            kwargs=kwargs
-        )
+    def has_running_threads(self, device_id) -> bool:
+        # Check if any pending tasks in the queue are for the given device_id
+        with self.task_queue.mutex:
+            return any(task.get("device_id") == device_id for task in self.task_queue.queue)
 
-    @staticmethod
-    def has_running_threads(device_id) -> bool:
-        running_threads = [thread.name for thread in threading.enumerate() if thread.name in [
-            f'kaku{KlikAanKlikUitAction.TURN_ON.value}{device_id}',
-            f'kaku{KlikAanKlikUitAction.DIM.value}{device_id}',
-            f'kaku{KlikAanKlikUitAction.TURN_OFF.value}{device_id}'
-        ]]
-        if running_threads:
-            _LOGGER.info(f'Running KlikAanKlikUit threads: {",".join(running_threads)}')
-            return True
-        return False
+    def add_task(self, device_id, action, params=None):
+        if not self.has_running_threads(device_id):
+            task = {"device_id": device_id, "action": action, "params": params or {}}
+            self.task_queue.put(task)
+    
+    def stop(self):
+        self.stop_event.set()
 
 
 class KlikAanKlikUitDevice(LightEntity):
@@ -144,54 +162,70 @@ class KlikAanKlikUitDevice(LightEntity):
 
     def turn_on(self, **kwargs: Any) -> None:
         _LOGGER.info(f'Function turn_on called in thread {threading.current_thread().name}')
+    
+        # Check if the centralized thread is running
+        if not hasattr(self, 'worker_thread') or not self.worker_thread.is_alive():
+            _LOGGER.error("Worker thread is not running. Please start the KlikAanKlikUitThread.")
+            return
+
+        # Avoid adding tasks if tasks are already in progress for this device
         if KlikAanKlikUitThread.has_running_threads(self._id):
             return
 
         self._brightness = kwargs.get(ATTR_BRIGHTNESS, 255)
+    
         if self.is_on is None or not self.is_on:
-            KlikAanKlikUitThread(
-                action=KlikAanKlikUitAction.TURN_ON,
+            # Add TURN_ON task to the centralized worker thread
+            self.worker_thread.add_task(
                 device_id=self._id,
-                target=repeat,
-                kwargs={
+                action=KlikAanKlikUitAction.TURN_ON,
+                params={
                     'tries': self.tries,
                     'sleep': self.sleep,
                     'callable_function': self._hub.turn_on,
                     'entity': self._id
                 }
-            ).start()
+            )
         else:
             # KlikAanKlikUit brightness goes from 1 to 15 so divide by 17
-            KlikAanKlikUitThread(
-                action=KlikAanKlikUitAction.DIM,
+            self.worker_thread.add_task(
                 device_id=self._id,
-                target=repeat,
-                kwargs={
+                action=KlikAanKlikUitAction.DIM,
+                params={
                     'tries': self.tries,
                     'sleep': self.sleep,
                     'callable_function': self._hub.dim,
                     'entity': self._id,
                     'level': math.ceil(self.brightness / 17)
                 }
-            ).start()
+            )
+    
         self._state = True
+
 
     def turn_off(self, **kwargs: Any) -> None:
         _LOGGER.info(f'Function turn_off called in thread {threading.current_thread().name}')
+    
+        # Check if the centralized thread is running
+        if not hasattr(self, 'worker_thread') or not self.worker_thread.is_alive():
+            _LOGGER.error("Worker thread is not running. Please start the KlikAanKlikUitThread.")
+            return
+
+        # Avoid adding tasks if tasks are already in progress for this device
         if KlikAanKlikUitThread.has_running_threads(self._id):
             return
 
-        KlikAanKlikUitThread(
-            action=KlikAanKlikUitAction.TURN_OFF,
+        # Add TURN_OFF task to the centralized worker thread
+        self.worker_thread.add_task(
             device_id=self._id,
-            target=repeat,
-            kwargs={
+            action=KlikAanKlikUitAction.TURN_OFF,
+            params={
                 'tries': self.tries,
                 'sleep': self.sleep,
                 'callable_function': self._hub.turn_off,
                 'entity': self._id
             }
-        ).start()
+        )
         self._state = False
 
     def update(self) -> None:
